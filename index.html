@@ -78,6 +78,7 @@ button.sec{background:var(--bg);color:var(--tx);border:1px solid var(--bd);margi
 const $ = s => document.querySelector(s);
 const nat = (a, b) => a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'});
 const IMG = /\.(jpe?g|png|webp|gif)$/i;
+const mime = n => /\.png$/i.test(n) ? 'image/png' : /\.webp$/i.test(n) ? 'image/webp' : /\.gif$/i.test(n) ? 'image/gif' : 'image/jpeg';
 let file = null, outBlob = null, outName = '';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
@@ -104,7 +105,7 @@ async function pagesFromZip(f) {
   const names = Object.keys(z.files)
     .filter(n => !z.files[n].dir && IMG.test(n) && !n.includes('__MACOSX')).sort(nat);
   if (!names.length) throw new Error('Nenhuma imagem encontrada no arquivo.');
-  return names.map(n => () => z.files[n].async('blob'));
+  return names.map(n => async () => new Blob([await z.files[n].async('uint8array')], {type: mime(n)}));
 }
 async function pagesFromPdf(f, W, H) {
   const pdf = await pdfjsLib.getDocument({data: await f.arrayBuffer()}).promise;
@@ -131,8 +132,11 @@ async function pagesFromRar(f) {
   if (!names.length) throw new Error('Nenhuma imagem encontrada no RAR.');
   // RAR "sólido" depende dos arquivos anteriores: extraímos tudo de uma vez e guardamos em memória.
   const map = new Map();
-  for (const x of ex.extract({files: names}).files) map.set(x.fileHeader.name, new Blob([x.extraction.data]));
-  return names.map(n => async () => map.get(n));
+  for (const x of ex.extract({files: names}).files) {
+    const d = x.extraction?.data;
+    if (d?.length) map.set(x.fileHeader.name, new Blob([d], {type: mime(x.fileHeader.name)}));
+  }
+  return names.map(n => async () => map.get(n) || null);
 }
 
 // MOBI: é um "banco de registros" (PalmDB). HQs guardam cada página como um registro de imagem.
@@ -165,8 +169,18 @@ async function readPages(f, W, H) {
 }
 
 // ---------- 2) Compressão: redimensiona p/ a tela do Kindle + recodifica JPEG ----------
+async function decode(blob) {
+  if (!blob) return null;
+  try { const b = await createImageBitmap(blob); return {src: b, width: b.width, height: b.height, done: () => b.close()}; }
+  catch {
+    try { // plano B: o <img> do navegador costuma aceitar o que o createImageBitmap recusa
+      const u = URL.createObjectURL(blob), im = new Image(); im.src = u; await im.decode();
+      return {src: im, width: im.naturalWidth, height: im.naturalHeight, done: () => URL.revokeObjectURL(u)};
+    } catch { return null; }
+  }
+}
 async function encode(blob, W, H, q, gray, k) {
-  const bmp = await createImageBitmap(blob);
+  const bmp = await decode(blob); if (!bmp) return null;
   const [A, B] = bmp.width > bmp.height ? [H, W] : [W, H];
   const s = Math.min(1, (A * k) / bmp.width, (B * k) / bmp.height); // nunca amplia
   const w = Math.max(1, Math.round(bmp.width * s)), h = Math.max(1, Math.round(bmp.height * s));
@@ -174,7 +188,7 @@ async function encode(blob, W, H, q, gray, k) {
   const x = c.getContext('2d');
   x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
   if (gray) x.filter = 'grayscale(1)';
-  x.drawImage(bmp, 0, 0, w, h); bmp.close();
+  x.drawImage(bmp.src, 0, 0, w, h); bmp.done();
   const out = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
   return {blob: out, w, h};
 }
@@ -210,25 +224,27 @@ $('#go').onclick = async () => {
     // Tentativas: vai baixando qualidade e, se preciso, a resolução, até caber no limite.
     const steps = [[q0, 1], [q0 - .1, 1], [q0 - .2, 1], [q0 - .3, .9], [.4, .8], [.35, .7], [.3, .6]]
       .map(([q, k]) => [Math.max(.3, q), k]);
-    let pages, total, tries = 0;
+    let pages, total, tries = 0, bad = 0;
     for (const [q, k] of steps) {
-      tries++; pages = []; total = 0;
+      tries++; pages = []; total = 0; bad = 0;
       for (let i = 0; i < N; i++) {
         status(`Tentativa ${tries}/${steps.length} · página ${i + 1}/${N} · qualidade ${Math.round(q * 100)}%`);
         prog(((tries - 1) + i / N) / steps.length);
         const r = await encode(await loaders[i](), W, H, q, gray, k);
+        if (!r) { bad++; continue; }
         pages.push(r); total += r.blob.size;
         if (total > limit * 1.02) break; // já estourou: não adianta continuar
       }
-      if (pages.length === N && total <= limit) break;
+      if (pages.length + bad === N && pages.length && total <= limit) break;
     }
+    if (!pages.length) throw new Error('Não consegui decodificar nenhuma imagem do arquivo.');
     status('Empacotando EPUB…');
     const title = file.name.replace(/\.[^.]+$/, '');
     outBlob = await buildEpub(pages, title); outName = title + '.epub';
     prog(1);
     const mb = (outBlob.size / 1e6).toFixed(1);
     const fits = outBlob.size <= limit;
-    status(`${fits ? '✅' : '⚠️ Passou do limite,'} ${N} páginas · ${mb} MB`, fits ? 'ok' : 'err');
+    status(`${fits ? '✅' : '⚠️ Passou do limite,'} ${pages.length} páginas · ${mb} MB${bad ? ` · ${bad} página(s) ilegível(is) puladas` : ''}`, fits ? 'ok' : 'err');
     $('#dl').classList.remove('hide');
     if (navigator.canShare?.({files: [new File([outBlob], outName, {type: 'application/epub+zip'})]})) $('#sh').classList.remove('hide');
   } catch (e) { console.error(e); status('Erro: ' + e.message, 'err'); }
