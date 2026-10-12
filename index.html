@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>HQ → EPUB para Kindle</title>
+<style>
+:root{--bg:#f4f6fb;--card:#fff;--tx:#0f172a;--mu:#64748b;--ac:#6366f1;--ac2:#8b5cf6;--bd:#e2e8f0}
+@media(prefers-color-scheme:dark){:root{--bg:#0b1020;--card:#151b2e;--tx:#e8ecf8;--mu:#94a3b8;--bd:#263049}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:max(16px,env(safe-area-inset-top)) 16px max(16px,env(safe-area-inset-bottom))}
+main{max-width:560px;margin:0 auto;display:grid;gap:16px}
+h1{font-size:1.5rem;margin:8px 0 0}
+p.sub{margin:0;color:var(--mu)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:16px;padding:16px}
+.drop{border:2px dashed var(--bd);border-radius:16px;padding:32px 16px;text-align:center;cursor:pointer;transition:.2s}
+.drop.on{border-color:var(--ac);background:rgba(99,102,241,.08)}
+.drop b{display:block;font-size:1.05rem}
+.drop span{color:var(--mu);font-size:.9rem}
+label{display:block;font-size:.85rem;color:var(--mu);margin:12px 0 4px}
+select,input[type=number]{width:100%;padding:10px;border-radius:10px;border:1px solid var(--bd);background:var(--bg);color:var(--tx);font-size:1rem}
+input[type=range]{width:100%;accent-color:var(--ac)}
+.row{display:flex;align-items:center;gap:8px;margin-top:12px}
+button{width:100%;border:0;border-radius:12px;padding:14px;font-size:1rem;font-weight:600;color:#fff;background:linear-gradient(135deg,var(--ac),var(--ac2));cursor:pointer}
+button:disabled{opacity:.5}
+button.sec{background:var(--bg);color:var(--tx);border:1px solid var(--bd);margin-top:8px}
+.bar{height:10px;background:var(--bd);border-radius:99px;overflow:hidden;margin-top:12px}
+.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--ac),var(--ac2));transition:width .2s}
+#st{color:var(--mu);font-size:.9rem;margin-top:8px;min-height:1.4em}
+.ok{color:#16a34a;font-weight:600}.err{color:#dc2626}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>📚 HQ → EPUB</h1>
+    <p class="sub">Converte CBZ, CBR, PDF e MOBI em EPUB otimizado para Kindle. Tudo roda no seu aparelho: nenhum arquivo é enviado para a internet.</p>
+  </div>
+
+  <div class="drop" id="drop">
+    <b id="fname">Toque para escolher o arquivo</b>
+    <span>.cbz · .cbr · .pdf · .mobi</span>
+    <input id="file" type="file" accept=".cbz,.cbr,.pdf,.mobi,.azw3,.azw,.zip" class="hide">
+  </div>
+
+  <div class="card">
+    <label for="dev">Modelo do Kindle (define a resolução)</label>
+    <select id="dev">
+      <option value="1236,1648">Paperwhite (2021+)</option>
+      <option value="1072,1448">Kindle básico / Paperwhite antigo</option>
+      <option value="1264,1680">Oasis</option>
+      <option value="1860,2480">Scribe</option>
+    </select>
+
+    <label for="lim">Limite de tamanho (MB)</label>
+    <input id="lim" type="number" value="48" min="5" max="200">
+
+    <label for="q">Qualidade inicial: <b id="qv">85</b>%</label>
+    <input id="q" type="range" min="40" max="95" value="85">
+
+    <div class="row"><input id="gray" type="checkbox" checked><label for="gray" style="margin:0">Tons de cinza (e-ink é P&amp;B, economiza espaço)</label></div>
+  </div>
+
+  <div class="card">
+    <button id="go" disabled>Converter para EPUB</button>
+    <div class="bar"><i id="pb"></i></div>
+    <div id="st"></div>
+    <button id="dl" class="hide">⬇️ Baixar EPUB</button>
+    <button id="sh" class="sec hide">📤 Compartilhar / Enviar ao Kindle</button>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const nat = (a, b) => a.localeCompare(b, undefined, {numeric: true, sensitivity: 'base'});
+const IMG = /\.(jpe?g|png|webp|gif)$/i;
+let file = null, outBlob = null, outName = '';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+// ---------- UI ----------
+const status = (t, c = '') => { $('#st').className = c; $('#st').textContent = t; };
+const prog = p => $('#pb').style.width = Math.round(p * 100) + '%';
+$('#q').oninput = e => $('#qv').textContent = e.target.value;
+$('#drop').onclick = () => $('#file').click();
+['dragover', 'dragleave', 'drop'].forEach(ev => $('#drop').addEventListener(ev, e => {
+  e.preventDefault(); $('#drop').classList.toggle('on', ev === 'dragover');
+  if (ev === 'drop') pick(e.dataTransfer.files[0]);
+}));
+$('#file').onchange = e => pick(e.target.files[0]);
+function pick(f) {
+  if (!f) return;
+  file = f; $('#fname').textContent = `${f.name} (${(f.size / 1e6).toFixed(1)} MB)`;
+  $('#go').disabled = false; $('#dl').classList.add('hide'); $('#sh').classList.add('hide'); prog(0); status('');
+}
+
+// ---------- 1) Leitura: cada formato vira uma lista de "carregadores" de página ----------
+async function pagesFromZip(f) {
+  const z = await JSZip.loadAsync(f);
+  const names = Object.keys(z.files)
+    .filter(n => !z.files[n].dir && IMG.test(n) && !n.includes('__MACOSX')).sort(nat);
+  if (!names.length) throw new Error('Nenhuma imagem encontrada no arquivo.');
+  return names.map(n => () => z.files[n].async('blob'));
+}
+async function pagesFromPdf(f, W, H) {
+  const pdf = await pdfjsLib.getDocument({data: await f.arrayBuffer()}).promise;
+  return Array.from({length: pdf.numPages}, (_, i) => {
+    let cache; // renderizar PDF é caro: guardamos o resultado
+    return async () => cache ??= await (async () => {
+      const p = await pdf.getPage(i + 1), v = p.getViewport({scale: 1});
+      const [A, B] = v.width > v.height ? [H, W] : [W, H];
+      const vp = p.getViewport({scale: Math.min(A / v.width, B / v.height)});
+      const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height;
+      await p.render({canvasContext: c.getContext('2d'), viewport: vp}).promise;
+      return await new Promise(r => c.toBlob(r, 'image/jpeg', .92));
+    })();
+  });
+}
+// RAR: o descompactador é um módulo WebAssembly (unrar compilado), baixado só quando preciso.
+async function pagesFromRar(f) {
+  const V = 'node-unrar-js@2.0.2';
+  const {createExtractorFromData} = await import(`https://esm.sh/${V}`);
+  const wasmBinary = await (await fetch(`https://cdn.jsdelivr.net/npm/${V}/esm/js/unrar.wasm`)).arrayBuffer();
+  const ex = await createExtractorFromData({wasmBinary, data: new Uint8Array(await f.arrayBuffer())});
+  const names = [...ex.getFileList().fileHeaders]
+    .filter(h => !h.flags.directory && IMG.test(h.name)).map(h => h.name).sort(nat);
+  if (!names.length) throw new Error('Nenhuma imagem encontrada no RAR.');
+  // RAR "sólido" depende dos arquivos anteriores: extraímos tudo de uma vez e guardamos em memória.
+  const map = new Map();
+  for (const x of ex.extract({files: names}).files) map.set(x.fileHeader.name, new Blob([x.extraction.data]));
+  return names.map(n => async () => map.get(n));
+}
+
+// MOBI: é um "banco de registros" (PalmDB). HQs guardam cada página como um registro de imagem.
+// Lemos a tabela de offsets e pegamos os registros cujos primeiros bytes são de JPEG/PNG/GIF.
+async function pagesFromMobi(f) {
+  const buf = await f.arrayBuffer(), dv = new DataView(buf), n = dv.getUint16(76), offs = [];
+  for (let i = 0; i < n; i++) offs.push(dv.getUint32(78 + i * 8));
+  offs.push(buf.byteLength);
+  const pages = [];
+  for (let i = 0; i < n; i++) {
+    const a = offs[i], b = offs[i + 1];
+    if (b - a < 8000) continue; // ignora ícones/miniaturas
+    const u = new Uint8Array(buf, a, 4);
+    const t = u[0] === 0xFF && u[1] === 0xD8 ? 'image/jpeg' : u[0] === 0x89 && u[1] === 0x50 ? 'image/png' : u[0] === 0x47 && u[1] === 0x49 ? 'image/gif' : null;
+    if (t) pages.push(async () => new Blob([buf.slice(a, b)], {type: t}));
+  }
+  if (!pages.length) throw new Error('Esse MOBI não tem páginas em imagem (é só texto) ou tem DRM.');
+  return pages;
+}
+
+async function readPages(f, W, H) {
+  const ext = f.name.split('.').pop().toLowerCase();
+  if (ext === 'pdf') return pagesFromPdf(f, W, H);
+  if (['mobi', 'azw', 'azw3'].includes(ext)) return pagesFromMobi(f);
+  // Para CBZ/CBR não confiamos na extensão: lemos os "magic bytes" do início do arquivo.
+  const magic = new TextDecoder('latin1').decode(new Uint8Array(await f.slice(0, 4).arrayBuffer()));
+  if (magic.startsWith('PK')) return pagesFromZip(f);
+  if (magic === 'Rar!') return pagesFromRar(f);
+  throw new Error('Formato não reconhecido.');
+}
+
+// ---------- 2) Compressão: redimensiona p/ a tela do Kindle + recodifica JPEG ----------
+async function encode(blob, W, H, q, gray, k) {
+  const bmp = await createImageBitmap(blob);
+  const [A, B] = bmp.width > bmp.height ? [H, W] : [W, H];
+  const s = Math.min(1, (A * k) / bmp.width, (B * k) / bmp.height); // nunca amplia
+  const w = Math.max(1, Math.round(bmp.width * s)), h = Math.max(1, Math.round(bmp.height * s));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+  if (gray) x.filter = 'grayscale(1)';
+  x.drawImage(bmp, 0, 0, w, h); bmp.close();
+  const out = await new Promise(r => c.toBlob(r, 'image/jpeg', q));
+  return {blob: out, w, h};
+}
+
+// ---------- 3) Empacotamento EPUB (um EPUB é só um ZIP com HTML + imagens) ----------
+const esc = s => s.replace(/[<>&"]/g, c => ({'<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;'}[c]));
+async function buildEpub(pages, title) {
+  const z = new JSZip(), id = 'urn:uuid:' + crypto.randomUUID();
+  z.file('mimetype', 'application/epub+zip', {compression: 'STORE'}); // precisa ser o 1º arquivo
+  z.file('META-INF/container.xml', '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  z.file('OEBPS/s.css', 'html,body{margin:0;padding:0}img{width:100%;height:100%;object-fit:contain}');
+  let man = '', spine = '';
+  pages.forEach((p, i) => {
+    const n = String(i + 1).padStart(4, '0');
+    z.file(`OEBPS/images/${n}.jpg`, p.blob, {compression: 'STORE'}); // JPEG já está comprimido
+    z.file(`OEBPS/${n}.xhtml`, `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>${n}</title><meta name="viewport" content="width=${p.w},height=${p.h}"/><link rel="stylesheet" href="s.css"/></head><body><img src="images/${n}.jpg" alt=""/></body></html>`);
+    man += `<item id="i${n}" href="images/${n}.jpg" media-type="image/jpeg"${i === 0 ? ' properties="cover-image"' : ''}/><item id="p${n}" href="${n}.xhtml" media-type="application/xhtml+xml"/>`;
+    spine += `<itemref idref="p${n}"/>`;
+  });
+  z.file('OEBPS/nav.xhtml', `<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>${esc(title)}</title></head><body><nav epub:type="toc"><ol><li><a href="0001.xhtml">${esc(title)}</a></li></ol></nav></body></html>`);
+  z.file('OEBPS/content.opf', `<?xml version="1.0" encoding="utf-8"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid" prefix="rendition: http://www.idpf.org/vocab/rendition/#"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">${id}</dc:identifier><dc:title>${esc(title)}</dc:title><dc:language>pt-BR</dc:language><meta property="dcterms:modified">${new Date().toISOString().slice(0, 19)}Z</meta><meta property="rendition:layout">pre-paginated</meta><meta property="rendition:spread">none</meta><meta name="book-type" content="comic"/><meta name="fixed-layout" content="true"/></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="css" href="s.css" media-type="text/css"/>${man}</manifest><spine>${spine}</spine></package>`);
+  return z.generateAsync({type: 'blob', mimeType: 'application/epub+zip'});
+}
+
+// ---------- Orquestração ----------
+$('#go').onclick = async () => {
+  $('#go').disabled = true; $('#dl').classList.add('hide'); $('#sh').classList.add('hide');
+  try {
+    const [W, H] = $('#dev').value.split(',').map(Number);
+    const limit = (+$('#lim').value || 48) * 1e6, q0 = $('#q').value / 100, gray = $('#gray').checked;
+    status('Lendo arquivo…'); prog(.02);
+    const loaders = await readPages(file, W, H), N = loaders.length;
+    // Tentativas: vai baixando qualidade e, se preciso, a resolução, até caber no limite.
+    const steps = [[q0, 1], [q0 - .1, 1], [q0 - .2, 1], [q0 - .3, .9], [.4, .8], [.35, .7], [.3, .6]]
+      .map(([q, k]) => [Math.max(.3, q), k]);
+    let pages, total, tries = 0;
+    for (const [q, k] of steps) {
+      tries++; pages = []; total = 0;
+      for (let i = 0; i < N; i++) {
+        status(`Tentativa ${tries}/${steps.length} · página ${i + 1}/${N} · qualidade ${Math.round(q * 100)}%`);
+        prog(((tries - 1) + i / N) / steps.length);
+        const r = await encode(await loaders[i](), W, H, q, gray, k);
+        pages.push(r); total += r.blob.size;
+        if (total > limit * 1.02) break; // já estourou: não adianta continuar
+      }
+      if (pages.length === N && total <= limit) break;
+    }
+    status('Empacotando EPUB…');
+    const title = file.name.replace(/\.[^.]+$/, '');
+    outBlob = await buildEpub(pages, title); outName = title + '.epub';
+    prog(1);
+    const mb = (outBlob.size / 1e6).toFixed(1);
+    const fits = outBlob.size <= limit;
+    status(`${fits ? '✅' : '⚠️ Passou do limite,'} ${N} páginas · ${mb} MB`, fits ? 'ok' : 'err');
+    $('#dl').classList.remove('hide');
+    if (navigator.canShare?.({files: [new File([outBlob], outName, {type: 'application/epub+zip'})]})) $('#sh').classList.remove('hide');
+  } catch (e) { console.error(e); status('Erro: ' + e.message, 'err'); }
+  $('#go').disabled = false;
+};
+$('#dl').onclick = () => {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(outBlob); a.download = outName; a.click();
+};
+$('#sh').onclick = () => navigator.share({files: [new File([outBlob], outName, {type: 'application/epub+zip'})], title: outName}).catch(() => {});
+</script>
+</body>
+</html>
