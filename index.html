@@ -133,10 +133,10 @@ async function pagesFromRar(f) {
   // RAR "sólido" depende dos arquivos anteriores: extraímos tudo de uma vez e guardamos em memória.
   const map = new Map();
   for (const x of ex.extract({files: names}).files) {
-    const d = x.extraction?.data;
+    const d = x.extraction; // neste extrator, 'extraction' já é o Uint8Array com os bytes
     if (d?.length) map.set(x.fileHeader.name, new Blob([d], {type: mime(x.fileHeader.name)}));
   }
-  if (!map.size) throw new Error(`RAR lido (${names.length} imagens listadas), mas a extração voltou vazia. Provável falta de memória no celular.`);
+  if (!map.size) throw new Error(`RAR lido (${names.length} imagens listadas), mas a extração voltou vazia. Pode ser arquivo protegido por senha ou falta de memória.`);
   return names.map(n => async () => map.get(n) || null);
 }
 
