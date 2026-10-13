@@ -136,6 +136,7 @@ async function pagesFromRar(f) {
     const d = x.extraction?.data;
     if (d?.length) map.set(x.fileHeader.name, new Blob([d], {type: mime(x.fileHeader.name)}));
   }
+  if (!map.size) throw new Error(`RAR lido (${names.length} imagens listadas), mas a extração voltou vazia. Provável falta de memória no celular.`);
   return names.map(n => async () => map.get(n) || null);
 }
 
@@ -169,14 +170,19 @@ async function readPages(f, W, H) {
 }
 
 // ---------- 2) Compressão: redimensiona p/ a tela do Kindle + recodifica JPEG ----------
+let lastDiag = '';
+async function diagOf(blob) {
+  const h = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+  return `${blob.size} bytes, tipo ${blob.type || '?'}, início ${[...h].map(b => b.toString(16).padStart(2, '0')).join(' ')}`;
+}
 async function decode(blob) {
-  if (!blob) return null;
+  if (!blob) { lastDiag = 'página sem dados (a extração devolveu vazio)'; return null; }
   try { const b = await createImageBitmap(blob); return {src: b, width: b.width, height: b.height, done: () => b.close()}; }
   catch {
     try { // plano B: o <img> do navegador costuma aceitar o que o createImageBitmap recusa
       const u = URL.createObjectURL(blob), im = new Image(); im.src = u; await im.decode();
       return {src: im, width: im.naturalWidth, height: im.naturalHeight, done: () => URL.revokeObjectURL(u)};
-    } catch { return null; }
+    } catch (e) { lastDiag = await diagOf(blob); return null; }
   }
 }
 async function encode(blob, W, H, q, gray, k) {
@@ -237,7 +243,7 @@ $('#go').onclick = async () => {
       }
       if (pages.length + bad === N && pages.length && total <= limit) break;
     }
-    if (!pages.length) throw new Error('Não consegui decodificar nenhuma imagem do arquivo.');
+    if (!pages.length) throw new Error('Não consegui decodificar nenhuma imagem. Detalhe: ' + lastDiag);
     status('Empacotando EPUB…');
     const title = file.name.replace(/\.[^.]+$/, '');
     outBlob = await buildEpub(pages, title); outName = title + '.epub';
